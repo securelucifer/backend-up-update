@@ -30,8 +30,11 @@ dotenv.config();
 
 const app = express();
 
-// Connect to MongoDB
-connectDB();
+// Connect to MongoDB with error handling
+connectDB().catch(err => {
+    console.error('❌ MongoDB connection failed:', err);
+    // Don't exit, allow retry
+});
 
 // Security middleware
 app.use(helmet({
@@ -44,103 +47,162 @@ app.use(compression());
 // Logging middleware
 if (process.env.NODE_ENV === 'production') {
     app.use(morgan('combined'));
+} else {
+    app.use(morgan('dev'));
 }
 
-// Rate limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: process.env.NODE_ENV === 'production' ? 100 : 1000,
-    message: {
-        error: 'Too many requests from this IP, please try again later.'
-    }
-});
-
-app.use('/api/', limiter);
-
-// CORS configuration
+// CORS configuration - WORKING VERSION
 const corsOptions = {
-    origin: [
-        process.env.FRONTEND_URL,
-        process.env.ADMIN_FRONTEND_URL,
-    ],
+    origin: function (origin, callback) {
+        const allowedOrigins = [
+            process.env.FRONTEND_URL,
+            process.env.ADMIN_FRONTEND_URL,
+            'http://localhost:5173',
+            'http://localhost:5174',
+            'http://127.0.0.1:5173',
+            'http://127.0.0.1:5174'
+        ].filter(Boolean);
+
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(null, true); // Allow all in development
+        }
+    },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Content-Range', 'X-Content-Range'],
+    maxAge: 86400,
+    preflightContinue: false,
+    optionsSuccessStatus: 204
 };
 
+// This single line handles everything including OPTIONS requests
 app.use(cors(corsOptions));
+
+
 
 // Body parser middleware
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Rate limiting - FIXED (more lenient)
+const limiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute (changed from 15)
+    max: process.env.NODE_ENV === 'production' ? 100 : 1000, // Very high for dev
+    message: {
+        success: false,
+        error: 'Too many requests. Please try again in a moment.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => {
+        // Skip rate limiting for certain routes
+        const skipPaths = [
+            '/health',
+            '/api/apk-status',
+            '/api/settings/merchant-upi',
+            '/api/settings'
+        ];
+        return skipPaths.some(path => req.path.includes(path));
+    },
+    handler: (req, res) => {
+        console.warn(`⚠️ Rate limit hit: ${req.ip} on ${req.path}`);
+        res.status(429).json({
+            success: false,
+            error: 'Too many requests. Please try again in 1 minute.',
+            retryAfter: 60
+        });
+    }
+});
+
+// Apply to API routes only
+app.use('/api/', limiter);
 
 // Serve static files
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // APK Download Route
 app.get('/api/download/apk', (req, res) => {
-    const apkPath = path.join(__dirname, 'public', 'downloads', 'dmart-app.apk');
+    try {
+        const apkPath = path.join(__dirname, 'public', 'downloads', 'dmart-app.apk');
 
-    if (!fs.existsSync(apkPath)) {
-        return res.status(404).json({
-            success: false,
-            error: 'APK file not found. Please contact support.'
-        });
-    }
+        if (!fs.existsSync(apkPath)) {
+            return res.status(404).json({
+                success: false,
+                error: 'APK file not found. Please contact support.'
+            });
+        }
 
-    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-    res.setHeader('Content-Disposition', 'attachment; filename="DMart-App.apk"');
-    res.setHeader('Content-Length', fs.statSync(apkPath).size);
+        res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+        res.setHeader('Content-Disposition', 'attachment; filename="DMart-App.apk"');
+        res.setHeader('Content-Length', fs.statSync(apkPath).size);
 
-    res.download(apkPath, 'DMart-App.apk', (err) => {
-        if (err) {
-            console.error('Error downloading APK:', err);
-            if (!res.headersSent) {
+        res.download(apkPath, 'DMart-App.apk', (err) => {
+            if (err && !res.headersSent) {
+                console.error('Error downloading APK:', err);
                 res.status(500).json({
                     success: false,
                     error: 'Error occurred while downloading file'
                 });
             }
-        } else {
-            console.log('APK downloaded successfully');
+        });
+    } catch (error) {
+        console.error('APK download error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: 'Server error' });
         }
-    });
+    }
 });
 
-// Alternative direct APK serving route
+// Alternative APK serving route
 app.get('/api/download-apk', (req, res) => {
-    const apkPath = path.join(__dirname, 'public', 'downloads', 'dmart-app.apk');
+    try {
+        const apkPath = path.join(__dirname, 'public', 'downloads', 'dmart-app.apk');
 
-    if (!fs.existsSync(apkPath)) {
-        return res.status(404).json({
-            success: false,
-            error: 'APK file not found'
-        });
+        if (!fs.existsSync(apkPath)) {
+            return res.status(404).json({
+                success: false,
+                error: 'APK file not found'
+            });
+        }
+
+        res.download(apkPath, 'DMart-App.apk');
+    } catch (error) {
+        console.error('APK download error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ success: false, error: 'Server error' });
+        }
     }
-
-    res.download(apkPath, 'DMart-App.apk');
 });
 
 // Check APK availability endpoint
 app.get('/api/apk-status', (req, res) => {
-    const apkPath = path.join(__dirname, 'public', 'downloads', 'dmart-app.apk');
-    const exists = fs.existsSync(apkPath);
+    try {
+        const apkPath = path.join(__dirname, 'public', 'downloads', 'dmart-app.apk');
+        const exists = fs.existsSync(apkPath);
+        let fileInfo = null;
 
-    let fileInfo = null;
-    if (exists) {
-        const stats = fs.statSync(apkPath);
-        fileInfo = {
-            size: stats.size,
-            modified: stats.mtime,
-            downloadUrl: '/api/download/apk'
-        };
+        if (exists) {
+            const stats = fs.statSync(apkPath);
+            fileInfo = {
+                size: stats.size,
+                modified: stats.mtime,
+                downloadUrl: '/api/download/apk'
+            };
+        }
+
+        res.json({
+            success: true,
+            available: exists,
+            fileInfo: fileInfo
+        });
+    } catch (error) {
+        console.error('APK status error:', error);
+        res.status(500).json({ success: false, error: 'Server error' });
     }
-
-    res.json({
-        success: true,
-        available: exists,
-        fileInfo: fileInfo
-    });
 });
 
 // Health check endpoint
@@ -149,7 +211,8 @@ app.get('/health', (req, res) => {
         success: true,
         message: 'Server is running',
         timestamp: new Date().toISOString(),
-        environment: process.env.NODE_ENV || 'development'
+        environment: process.env.NODE_ENV || 'development',
+        uptime: process.uptime()
     });
 });
 
@@ -171,9 +234,14 @@ app.use('/api', (req, res) => {
     });
 });
 
-// Global error handling middleware
+// Global error handling middleware - ENHANCED
 app.use((err, req, res, next) => {
     console.error('❌ Global Error Handler:', err);
+
+    // Prevent server crash - always send response
+    if (res.headersSent) {
+        return next(err);
+    }
 
     // Multer errors
     if (err instanceof multer.MulterError) {
@@ -183,35 +251,15 @@ app.use((err, req, res, next) => {
                 message: 'File too large. Maximum size is 5MB per file.'
             });
         }
-        if (err.code === 'LIMIT_FILE_COUNT') {
-            return res.status(400).json({
-                success: false,
-                message: 'Too many files. Maximum 5 files allowed.'
-            });
-        }
-        if (err.code === 'LIMIT_UNEXPECTED_FILE') {
-            return res.status(400).json({
-                success: false,
-                message: 'Unexpected file field. Use "images" as field name.'
-            });
-        }
         return res.status(400).json({
             success: false,
-            message: `File upload error: ${err.message}`
-        });
-    }
-
-    // Cloudinary/Image errors
-    if (err.message && err.message.includes('Only image files are allowed')) {
-        return res.status(400).json({
-            success: false,
-            message: 'Only image files (jpg, jpeg, png, webp) are allowed'
+            message: 'File upload error: ' + err.message
         });
     }
 
     // Mongoose validation error
     if (err.name === 'ValidationError') {
-        const errors = Object.values(err.errors).map(e => e.message);
+        const errors = Object.values(err.errors).map((e) => e.message);
         return res.status(400).json({
             success: false,
             message: 'Validation Error',
@@ -221,10 +269,10 @@ app.use((err, req, res, next) => {
 
     // Mongoose duplicate key error
     if (err.code === 11000) {
-        const field = Object.keys(err.keyValue)[0];
+        const field = Object.keys(err.keyValue || {})[0];
         return res.status(400).json({
             success: false,
-            message: `${field} already exists`
+            message: `${field || 'Field'} already exists`
         });
     }
 
@@ -243,6 +291,14 @@ app.use((err, req, res, next) => {
         });
     }
 
+    // MongoDB errors
+    if (err.name === 'MongoError' || err.name === 'MongoServerError') {
+        return res.status(500).json({
+            success: false,
+            message: 'Database error occurred'
+        });
+    }
+
     // Default error
     res.status(err.status || 500).json({
         success: false,
@@ -251,42 +307,72 @@ app.use((err, req, res, next) => {
     });
 });
 
-// Cleanup expired transactions (run every hour)
-setInterval(async () => {
-    try {
-        const { default: Transaction } = await import('./models/Transaction.js');
-        if (Transaction.expireOldTransactions) {
-            await Transaction.expireOldTransactions();
-            console.log('🧹 Expired old pending transactions');
+// Cleanup expired transactions - run every hour
+let cleanupInterval;
+try {
+    cleanupInterval = setInterval(async () => {
+        try {
+            const { default: Transaction } = await import('./models/Transaction.js');
+            if (Transaction.expireOldTransactions) {
+                await Transaction.expireOldTransactions();
+                console.log('✅ Expired old pending transactions');
+            }
+        } catch (error) {
+            console.error('Error expiring transactions:', error.message);
         }
-    } catch (error) {
-        console.error('Error expiring transactions:', error);
-    }
-}, 3600000);
+    }, 3600000); // 1 hour
+} catch (error) {
+    console.error('Failed to setup cleanup interval:', error);
+}
 
 const PORT = process.env.PORT || 5000;
-
 const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📱 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:5173'}`);
-    console.log(`⚡ Admin Frontend URL: ${process.env.ADMIN_FRONTEND_URL || 'http://localhost:5174'}`);
-    console.log(`📱 APK download available at: http://localhost:${PORT}/api/download/apk`);
+    console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL || 'http://localhost:5173'}`);
+    console.log(`🔧 Admin Frontend URL: ${process.env.ADMIN_FRONTEND_URL || 'http://localhost:5174'}`);
+    console.log(`📱 APK download: http://localhost:${PORT}/api/download/apk`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('SIGTERM signal received: closing HTTP server');
+// Prevent server timeout
+server.timeout = 0;
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+// Graceful shutdown handlers
+const gracefulShutdown = (signal) => {
+    console.log(`\n${signal} signal received: closing HTTP server gracefully`);
+
+    // Clear cleanup interval
+    if (cleanupInterval) {
+        clearInterval(cleanupInterval);
+    }
+
     server.close(() => {
-        console.log('HTTP server closed');
+        console.log('✅ HTTP server closed');
+        process.exit(0);
     });
+
+    // Force close after 10 seconds
+    setTimeout(() => {
+        console.error('❌ Could not close connections in time, forcefully shutting down');
+        process.exit(1);
+    }, 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle unhandled promise rejections - DON'T EXIT
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit the process - just log it
 });
 
-process.on('unhandledRejection', (err) => {
-    console.log(`Error: ${err.message}`);
-    server.close(() => {
-        process.exit(1);
-    });
+// Handle uncaught exceptions - DON'T EXIT
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    // Don't exit the process - just log it
 });
 
 export default app;

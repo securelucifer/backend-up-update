@@ -10,10 +10,10 @@ const settingsSchema = new mongoose.Schema({
     },
     merchantSecret: {
         type: String,
-        default: 'my_super_secret_key'
+        default: 'mysupersecretkey'
     },
 
-    // Other Settings (for future expansion)
+    // Other Settings
     siteName: {
         type: String,
         default: 'My E-Commerce Store'
@@ -23,7 +23,7 @@ const settingsSchema = new mongoose.Schema({
         default: 'admin@example.com'
     },
 
-    // Single document tracking
+    // Version tracking
     settingsVersion: {
         type: Number,
         default: 1
@@ -34,11 +34,17 @@ const settingsSchema = new mongoose.Schema({
 
 // Ensure only one settings document exists
 settingsSchema.statics.getSettings = async function () {
-    let settings = await this.findOne();
-    if (!settings) {
-        settings = await this.create({});
+    try {
+        let settings = await this.findOne();
+        if (!settings) {
+            console.log('📝 Creating default settings document');
+            settings = await this.create({});
+        }
+        return settings;
+    } catch (error) {
+        console.error('Error in getSettings:', error);
+        throw error;
     }
-    return settings;
 };
 
 export default mongoose.model('Settings', settingsSchema);

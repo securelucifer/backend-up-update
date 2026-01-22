@@ -10,7 +10,7 @@ const router = express.Router();
 // Get all settings
 router.get('/', getSettings);
 
-// Update settings (add authentication middleware here)
+// Update settings
 router.put('/', updateSettings);
 
 // Get merchant UPI (public)
